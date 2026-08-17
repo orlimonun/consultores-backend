@@ -5,7 +5,8 @@ import java.util.List;
 public class ResultadoAuditoriaDTO {
     public Integer auditoriaId;
     public double madurezPromedioGeneral;
-    public double indiceGeneralRiesgo;
+    // Se elimino indiceGeneralRiesgo: el riesgo se reporta por eje del
+    // CID (C, I, D) por separado, sin promediarlos en un unico numero.
     public double riesgoC;
     public double riesgoI;
     public double riesgoD;
