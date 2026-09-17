@@ -23,11 +23,8 @@ import java.util.Map;
  *   IP (Procesos): sesiones totales/activas/inactivas/bloqueadas, procesos
  *   IM (Memoria):  SGA total/libre (% uso), buffer cache hit ratio
  *   IA (Archivos): tablespaces y su % de uso, datafiles online/problema
- *   ISBD = 0.30*IP + 0.35*IM + 0.35*IA
- *
- * Esta instancia NO reporta el indicador IR (Recuperacion): en Autonomous no
- * se puede administrar el multiplexado de bitacoras ni el modo de archivado,
- * porque Oracle los gestiona. Solo las instancias tradicionales lo envian.
+ *   IR (Recuperacion): 100 fijo, ver la nota en el calculo
+ *   ISBD = 0.20*IP + 0.30*IM + 0.30*IA + 0.20*IR
  */
 @Service
 public class OracleMonitorService {
@@ -59,7 +56,7 @@ public class OracleMonitorService {
     public SaludOracleDTO instanciaCaida(String detalle) {
         SaludOracleDTO dto = new SaludOracleDTO();
         dto.metricas = new ArrayList<>();
-        dto.ip = 0; dto.im = 0; dto.ia = 0; dto.isbd = 0;
+        dto.ip = 0; dto.im = 0; dto.ia = 0; dto.ir = 0.0; dto.isbd = 0;
         dto.estado = "unknown";
         dto.conectado = false;
         identificar(dto);
@@ -165,11 +162,22 @@ public class OracleMonitorService {
         if (maxUso >= 90 || datafilesProblema >= 1) ia = 40;
         else if (maxUso >= 80) ia = 80;
 
+        // ---------- RECUPERACION ----------
+        // Autonomous recibe 100 por definicion: la instancia esta siempre en
+        // ARCHIVELOG, con respaldos automaticos, y nada de eso es
+        // administrable. No hay forma de que el administrador lo haga mal,
+        // asi que no hay nada que penalizar. Eso permite usar una sola
+        // formula para las dos modalidades y comparar los ISBD en el mismo
+        // grafico, que es lo que no se podria con pesos distintos.
+        double ir = 100;
+        dto.metricas.add(metrica("Recuperacion", "Modo ARCHIVELOG", 1, "normal"));
+        dto.metricas.add(metrica("Recuperacion", "Archivado gestionado por Oracle", 1, "normal"));
+        dto.metricas.add(metrica("Recuperacion", "Respaldos automaticos", 1, "normal"));
+
         // ---------- ISBD ----------
-        dto.ip = ip; dto.im = im; dto.ia = ia;
-        dto.ir = null;   // Autonomous no reporta Recuperacion
-        dto.isbd = Math.round((0.30 * ip + 0.35 * im + 0.35 * ia) * 10) / 10.0;
-        boolean critico = ip <= 40 || im <= 40 || ia <= 40;
+        dto.ip = ip; dto.im = im; dto.ia = ia; dto.ir = ir;
+        dto.isbd = Math.round((0.20 * ip + 0.30 * im + 0.30 * ia + 0.20 * ir) * 10) / 10.0;
+        boolean critico = ip <= 40 || im <= 40 || ia <= 40 || ir <= 40;
         dto.estado = critico ? "critical" : estadoIsbd(dto.isbd);
         dto.conectado = true;
         identificar(dto);
