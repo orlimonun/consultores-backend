@@ -1,6 +1,7 @@
 package cr.una.consultores.service;
 
-import cr.una.consultores.dto.SaludOracleDTO;
+import cr.una.consultores.dto.ReporteAgenteDTO;
+import cr.una.consultores.dto.SaludInstanciaDTO;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -12,22 +13,11 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Guarda la ultima medicion que reporto cada agente.
+ * Guarda el ULTIMO REPORTE CRUDO de cada agente y lo evalua al leerlo.
  *
- * POR QUE EN MEMORIA Y NO EN LA BASE
- * Para no tocar el esquema de Neon, que esta en ddl-auto=validate: agregar
- * una entidad sin crear antes su tabla impide que la aplicacion arranque.
- * Cuando esto ya funcione se cambia por una tabla y se gana el historico.
- *
- * Consecuencia a tener presente: si el servicio de Render se reinicia o se
- * duerme, este mapa queda vacio hasta que el agente vuelva a reportar. Con
- * un intervalo de un minuto, el hueco es de un minuto.
- *
- * LATIDO
- * Si un agente deja de reportar, su instancia no desaparece: se conserva la
- * ultima lectura y se marca como sin contacto. Un monitor que oculta lo que
- * no responde no sirve, porque el silencio es justamente la senal mas
- * importante.
+ * Se guarda crudo a proposito: si se ajusta un umbral, el proximo
+ * /instancias reevalua lo que ya hay sin esperar al siguiente reporte.
+ * Con el veredicto ya congelado eso no seria posible.
  */
 @Service
 public class AgenteMetricasService {
@@ -35,61 +25,65 @@ public class AgenteMetricasService {
     private static final DateTimeFormatter ISO =
             DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC);
 
-    private final Map<String, SaludOracleDTO> ultimas = new ConcurrentHashMap<>();
+    private final EvaluadorSaludService evaluador;
+    private final Map<String, ReporteAgenteDTO> ultimos = new ConcurrentHashMap<>();
     private final Map<String, Instant> recibido = new ConcurrentHashMap<>();
 
-    /** Segundos sin reportar tras los cuales se considera perdido el contacto. */
     @Value("${agente.timeout-segundos:180}")
     private int timeoutSegundos;
 
-    public void registrar(SaludOracleDTO dto) {
-        if (dto == null || dto.instanciaId == null || dto.instanciaId.isBlank()) {
-            throw new IllegalArgumentException("El reporte debe traer instanciaId");
-        }
-        Instant ahora = Instant.now();
-        dto.origen = "agente";
-        dto.conectado = true;
-        dto.segundosSinContacto = 0;
-        if (dto.ultimaLectura == null || dto.ultimaLectura.isBlank()) {
-            dto.ultimaLectura = ISO.format(ahora);
-        }
-        if (dto.tipo == null || dto.tipo.isBlank()) {
-            dto.tipo = "tradicional";
-        }
-        ultimas.put(dto.instanciaId, dto);
-        recibido.put(dto.instanciaId, ahora);
+    public AgenteMetricasService(EvaluadorSaludService evaluador) {
+        this.evaluador = evaluador;
     }
 
-    /** Todas las instancias reportadas por agentes, con su latido evaluado. */
-    public List<SaludOracleDTO> listar() {
-        Instant ahora = Instant.now();
-        List<SaludOracleDTO> salida = new ArrayList<>();
+    public void registrar(ReporteAgenteDTO r) {
+        if (r == null || r.instanciaId == null || r.instanciaId.isBlank()) {
+            throw new IllegalArgumentException("El reporte debe traer instanciaId");
+        }
+        if (r.ultimaLectura == null || r.ultimaLectura.isBlank()) {
+            r.ultimaLectura = ISO.format(Instant.now());
+        }
+        if (r.tipo == null || r.tipo.isBlank()) r.tipo = "tradicional";
+        ultimos.put(r.instanciaId, r);
+        recibido.put(r.instanciaId, Instant.now());
+    }
 
-        for (Map.Entry<String, SaludOracleDTO> e : ultimas.entrySet()) {
-            SaludOracleDTO dto = e.getValue();
+    /**
+     * Evalua cada reporte con los umbrales vigentes y aplica el latido.
+     *
+     * Una instancia sin contacto NO desaparece: conserva sus ultimos
+     * valores y se marca el silencio. Ocultar lo que no responde es lo
+     * peor que puede hacer un monitor, porque el silencio suele ser la
+     * senal mas importante.
+     */
+    public List<SaludInstanciaDTO> listar() {
+        Instant ahora = Instant.now();
+        List<SaludInstanciaDTO> salida = new ArrayList<>();
+
+        for (Map.Entry<String, ReporteAgenteDTO> e : ultimos.entrySet()) {
+            SaludInstanciaDTO d = evaluador.evaluar(e.getValue(), "agente");
+
             Instant visto = recibido.get(e.getKey());
             long seg = visto == null ? Long.MAX_VALUE
                     : Duration.between(visto, ahora).getSeconds();
+            d.segundosSinContacto = (int) Math.min(seg, Integer.MAX_VALUE);
 
-            dto.segundosSinContacto = (int) Math.min(seg, Integer.MAX_VALUE);
             if (seg > timeoutSegundos) {
-                dto.conectado = false;
-                dto.estado = "unknown";   // se conservan los valores, no el veredicto
-            } else {
-                dto.conectado = true;
+                d.conectado = false;
+                d.estado = "unknown";   // se conservan los valores, no el veredicto
+                d.causasCriticas.add(0, "Sin contacto con el agente desde hace " +
+                        (seg / 60) + " minutos. Los valores mostrados son los últimos conocidos.");
             }
-            salida.add(dto);
+            salida.add(d);
         }
-        salida.sort(Comparator.comparing(d -> d.nombre == null ? "" : d.nombre));
+        salida.sort(Comparator.comparing(x -> x.nombre == null ? "" : x.nombre));
         return salida;
     }
 
-    public int cantidad() {
-        return ultimas.size();
-    }
+    public int cantidad() { return ultimos.size(); }
 
     public void olvidar(String instanciaId) {
-        ultimas.remove(instanciaId);
+        ultimos.remove(instanciaId);
         recibido.remove(instanciaId);
     }
 }
